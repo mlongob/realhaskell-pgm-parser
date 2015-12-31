@@ -3,6 +3,7 @@ import qualified Data.ByteString.Lazy.Char8 as L8
 import qualified Data.ByteString.Lazy as L
 import Data.Int (Int64)
 import Data.Word (Word8)
+import Data.Char (chr, isDigit, isSpace)
 
 data ParseState = ParseState {
     string :: L.ByteString,
@@ -57,3 +58,85 @@ firstParser ==> secondParser = Parse chainedParser
                     Left errMessage
                 Right (firstResult, newState) ->
                     runParse (secondParser firstResult) newState
+
+instance Functor Parse where
+    fmap f parser = parser ==> \result ->
+        identity(f result)
+
+w2c :: Word8 -> Char
+w2c = chr . fromIntegral
+
+parseChar :: Parse Char
+parseChar = w2c <$> parseByte
+
+peekByte :: Parse (Maybe Word8)
+peekByte = ((fst <$>) . L.uncons . string) <$> getState
+
+peekChar :: Parse (Maybe Char)
+peekChar = fmap w2c <$> peekByte
+
+parseWhile :: (Word8 -> Bool) -> Parse [Word8]
+parseWhile p = (fmap p <$> peekByte) ==> \mp ->
+                if mp == Just True
+                then parseByte ==> \b ->
+                    (b:) <$> parseWhile p
+                else identity []
+
+parseWhileWith :: (Word8 -> a) -> (a -> Bool) -> Parse [a]
+parseWhileWith f p = fmap f <$> parseWhile (p . f)
+
+parseNat :: Parse Int
+parseNat = parseWhileWith w2c isDigit ==> \digits ->
+            if null digits
+            then bail "no more input"
+            else let n = read digits
+                in if n < 0
+                   then bail "integer overflow"
+                   else identity n
+
+(==>&) :: Parse a -> Parse b -> Parse b
+p ==>& f = p ==> \_ -> f
+
+skipSpaces :: Parse ()
+skipSpaces = parseWhileWith w2c isSpace ==>& identity ()
+
+assert :: Bool -> String -> Parse ()
+assert True _ = identity ()
+assert False err = bail err
+
+parseBytes :: Int -> Parse L.ByteString
+parseBytes n =
+    getState ==> \st ->
+    let n' = fromIntegral n
+        (h, t) = L.splitAt n' (string st)
+        st' = st { offset = offset st + L.length h, string = t }
+    in putState st' ==>&
+        assert (L.length h == n') "end of input" ==>&
+        identity h
+
+-- PGM Parser
+data Greymap = Greymap {
+    greyWidth :: Int,
+    greyHeight :: Int,
+    greyMax :: Int,
+    greyData :: L.ByteString
+} deriving (Eq)
+
+instance Show Greymap where
+    show (Greymap w h m _) = "Greymap " ++ show w ++ "x" ++ show h ++
+                             " " ++ show m
+
+parseRawPGM :: Parse Greymap
+parseRawPGM =
+    parseWhileWith w2c notWhite ==> \header ->
+    skipSpaces ==>&
+    assert (header == "P5") "invalid raw header" ==>&
+    parseNat ==> \width ->
+    skipSpaces ==>&
+    parseNat ==> \heigth ->
+    skipSpaces ==>&
+    parseNat ==> \maxGrey ->
+    parseByte ==>&
+    parseBytes (width * heigth) ==> \bitmap ->
+    identity (Greymap width heigth maxGrey bitmap)
+  where notWhite = (`notElem` " \r\n\t")
